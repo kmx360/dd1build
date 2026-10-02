@@ -173,9 +173,19 @@ class Nand:
             return cls(f.read())
 
     @classmethod
-    def empty(cls):
-        """Create a blank NAND image (all 0xFF)."""
-        return cls(b"\xff" * (TOTAL_BLOCKS * RAW_BLOCK_SIZE))
+    def empty(cls, bad_blocks=None):
+        """Create a blank NAND image, optionally with bad block remaps."""
+        nand = cls(b"\xff" * (TOTAL_BLOCKS * RAW_BLOCK_SIZE))
+        if bad_blocks:
+            reserve_next = TOTAL_BLOCKS - 1
+            for block in bad_blocks:
+                if block >= RESERVE_START:
+                    continue
+                while reserve_next >= RESERVE_START and reserve_next in bad_blocks:
+                    reserve_next -= 1
+                nand.mark_bad(block, reserve_next)
+                reserve_next -= 1
+        return nand
 
     def save(self, path):
         with open(path, "wb") as f:
@@ -205,6 +215,18 @@ class Nand:
                 continue
             if spare.block_id in bad_set:
                 self._remap[spare.block_id] = b
+
+    def mark_bad(self, block, replacement):
+        """
+        Mark a block as bad and remap it to a replacement in the reserve area.
+        The bad block gets BadBlock=0x00 in its spare; subsequent reads/writes
+        of the logical block go to the replacement.
+        """
+        for p in range(PAGES_PER_BLOCK):
+            spare = Spare.encode(block_id=block, bad_block=0x00)
+            self._write_raw_page(block, p, b"\xff" * PAGE_SIZE, spare)
+        self._remap[block] = replacement
+        self._bad.append((block, 0x00))
 
     @property
     def bad_blocks(self):
@@ -256,14 +278,15 @@ class Nand:
 
     def write_block(self, block, data, spare_fn=None):
         """
-        Write 0x4000 bytes to a logical block.
+        Write data to a logical block, only touching pages that hold data.
 
         spare_fn(page_in_block) -> 16-byte spare template, or None for
         a default spare with just the block ID and BadBlock=0xFF.
         """
         phys = self._resolve(block)
-        data = data.ljust(BLOCK_SIZE, b"\xff")
-        for p in range(PAGES_PER_BLOCK):
+        num_pages = (len(data) + PAGE_SIZE - 1) // PAGE_SIZE
+        data = data.ljust(num_pages * PAGE_SIZE, b"\x00")
+        for p in range(num_pages):
             page_data = data[p * PAGE_SIZE : (p + 1) * PAGE_SIZE]
             if spare_fn:
                 spare = spare_fn(p)
@@ -294,25 +317,16 @@ class Nand:
         """
         Write to the logical flat address space.
 
-        Writes full blocks with default spare (block ID + BadBlock=0xFF).
-        For FS blocks that need specific spare metadata, use write_block().
+        Data must be block-aligned at the start. Only writes pages
+        that contain data; trailing pages in the last block stay erased.
         """
+        assert offset % BLOCK_SIZE == 0, "write_flat offset must be block-aligned"
         i = 0
         while i < len(data):
             block = (offset + i) // BLOCK_SIZE
-            block_off = (offset + i) % BLOCK_SIZE
-
-            if block_off == 0 and len(data) - i >= BLOCK_SIZE:
-                # Full block write
-                self.write_block(block, data[i : i + BLOCK_SIZE])
-                i += BLOCK_SIZE
-            else:
-                # Partial block: read-modify-write
-                bdata = bytearray(self.read_block(block))
-                chunk = min(len(data) - i, BLOCK_SIZE - block_off)
-                bdata[block_off : block_off + chunk] = data[i : i + chunk]
-                self.write_block(block, bdata)
-                i += chunk
+            chunk = min(len(data) - i, BLOCK_SIZE)
+            self.write_block(block, data[i : i + chunk])
+            i += chunk
 
     # -- Raw access ---------------------------------------------------------
 

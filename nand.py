@@ -1,9 +1,7 @@
 """
 Xbox 360 DD1 XeDK -- NAND structures, crypto, and SFCX filesystem.
 
-DD1 XeDK machines use all-zero 1BL key and CPU key. The bootloader
-chain uses DD1-specific stage names: S2 (CB), S3 (CD), S4 (CE),
-S5 (CF/kernel+HV).
+DD1 XeDK machines use all-zero 1BL key and CPU key.
 
 Flash layout (logical, flat addressing via nandio.Nand):
   0x0000  BldrFlash header (contains offsets to everything)
@@ -194,8 +192,9 @@ def decrypt_bl_chain_raw(region):
         bldr = Bldr.from_buffer_copy(region[off:])
         if bldr.Size == 0 or off + bldr.Size > len(region):
             break
-        bl = bytearray(region[off : off + bldr.Size])
-        off += bldr.Size
+        padded_size = (bldr.Size + 15) & ~15
+        bl = bytearray(region[off : off + padded_size])
+        off += padded_size
 
         key = hmac.new(key, bl[0x10:0x20], sha1).digest()[:0x10]
         bl[0x20:] = Cipher(ARC4(key), mode=None).encryptor().update(bl[0x20:])
@@ -225,6 +224,10 @@ def encrypt_bl_chain(bootloaders):
 
     for i, bl in enumerate(bootloaders):
         bl = bytearray(bl)
+        # Each stage must be 16-byte padded
+        padding = (16 - len(bl) % 16) % 16
+        bl += b"\x00" * padding
+
         key = hmac.new(key, bl[0x10:0x20], sha1).digest()[:0x10]
         bl[0x20:] = Cipher(ARC4(key), mode=None).encryptor().update(bl[0x20:])
 
@@ -312,14 +315,29 @@ def read_mobiles(nand, typed_blocks):
     """
     Read mobile blocks from scan results. Returns list of
     (filename, data_bytes) tuples.
+
+    The console appends new versions of a mobile to the next free pages
+    within the same block. The current version is found by locating the
+    last written page and using fs_size to determine how many pages back
+    to read.
     """
     result = []
     for t in sorted(MOBILE_TYPES):
         if t not in typed_blocks:
             continue
-        block_id, _, size = typed_blocks[t]
-        data = nand.read_block(block_id)[:size]
-        result.append((f"{MOBILE_TYPES[t]}.dat", data))
+        block_id = typed_blocks[t][0]
+        # Find last written page
+        last_page = PAGES_PER_BLOCK - 1
+        while last_page >= 0 and nand.read_page_spare(block_id, last_page).fs_block_type == 0x3F:
+            last_page -= 1
+        if last_page < 0:
+            continue
+        spare = nand.read_page_spare(block_id, last_page)
+        pages_used = (spare.fs_size + PAGE_SIZE - 1) // PAGE_SIZE
+        first_page = last_page - pages_used + 1
+        block_data = nand.read_block(block_id)
+        data = block_data[first_page * PAGE_SIZE : (last_page + 1) * PAGE_SIZE]
+        result.append((f"{MOBILE_TYPES[t]}.dat", data[:spare.fs_size]))
     return result
 
 
@@ -334,17 +352,19 @@ def write_mobiles(nand, mobiles, fs_start_block=FS_START_BLOCK, fs_sequence=1):
     for block_type, data in mobiles:
         bid = next_block
         next_block += 1
+        pages_used = (len(data) + PAGE_SIZE - 1) // PAGE_SIZE
+        free_pages = PAGES_PER_BLOCK - pages_used
         nand.write_block(
             bid,
             data,
             spare_fn=lambda p, _bid=bid, _type=block_type, _size=len(
                 data
-            ): Spare.encode(
+            ), _free=free_pages: Spare.encode(
                 block_id=_bid,
                 fs_block_type=_type,
                 fs_sequence=fs_sequence,
                 fs_size=_size,
-                fs_page_count=PAGES_PER_BLOCK - 1 - p,
+                fs_page_count=_free,
             ),
         )
     return next_block
@@ -358,7 +378,7 @@ def write_fs(nand, entries, fs_start_block=FS_START_BLOCK):
     Returns the root block ID.
     """
     next_block = fs_start_block
-    fat = [FAT_END] * TOTAL_BLOCKS
+    fat = [FAT_FREE] * TOTAL_BLOCKS
     dir_entries = []
     fs_sequence = 1
 
@@ -382,19 +402,20 @@ def write_fs(nand, entries, fs_start_block=FS_START_BLOCK):
             next_block += 1
 
         for i, bid in enumerate(file_blocks):
-            fat[bid] = file_blocks[i + 1] if i + 1 < len(file_blocks) else FAT_END
+            fat[bid] = file_blocks[i + 1] if i + 1 < len(file_blocks) else (FAT_END | 0x8000)
 
         for i, bid in enumerate(file_blocks):
             chunk = data[i * BLOCK_SIZE : (i + 1) * BLOCK_SIZE]
-            chunk = chunk.ljust(BLOCK_SIZE, b"\xff")
+            pages_used = (len(chunk) + PAGE_SIZE - 1) // PAGE_SIZE
+            free_pages = PAGES_PER_BLOCK - pages_used
             nand.write_block(
                 bid,
                 chunk,
-                spare_fn=lambda p, _bid=bid: Spare.encode(
+                spare_fn=lambda p, _bid=bid, _free=free_pages: Spare.encode(
                     block_id=_bid,
                     fs_block_type=0x00,
                     fs_sequence=fs_sequence,
-                    fs_page_count=PAGES_PER_BLOCK - 1 - p,
+                    fs_page_count=_free,
                 ),
             )
 
@@ -404,6 +425,9 @@ def write_fs(nand, entries, fs_start_block=FS_START_BLOCK):
         dir_ent.Size = len(data)
         dir_ent.Timestamp = timestamp
         dir_entries.append(dir_ent)
+
+    root_block_id = next_block
+    fat[root_block_id] = 0x1FFD
 
     root_data = bytearray(BLOCK_SIZE)
     dir_idx = 0
@@ -425,7 +449,6 @@ def write_fs(nand, entries, fs_start_block=FS_START_BLOCK):
                     )
                     dir_idx += 1
 
-    root_block_id = next_block
     nand.write_block(
         root_block_id,
         root_data,

@@ -32,6 +32,9 @@ from nand import (
     FS_START_BLOCK,
 )
 
+# Reverse map for CLI: name -> block type
+_MOBILE_NAME_TO_TYPE = {name.lower(): t for t, name in MOBILE_TYPES.items()}
+
 
 def build_image(
     smc,
@@ -40,6 +43,7 @@ def build_image(
     fs_entries=None,
     smc_config=None,
     mobiles=None,
+    bad_blocks=None,
     bl_entry=DEFAULT_BL_ENTRY,
     bl_region_size=None,
 ):
@@ -52,33 +56,20 @@ def build_image(
     fs_entries: list of (name, data, dos_timestamp) tuples, or None
     smc_config: raw SMC config bytes, or None
     mobiles: list of (block_type, data) tuples, or None
+    bad_blocks: list of block indices to mark as bad, or None
     """
-    nand = Nand.empty()
+    nand = Nand.empty(bad_blocks)
 
     if bl_region_size is None:
-        bl_region_size = DEFAULT_SYSUPDATE_ADDR - bl_entry
+        bl_region_size = DEFAULT_SYSUPDATE_ADDR
 
-    # Encrypt and place SMC
+    # Encrypt components
     smc = bytearray(smc)
     XeCryptSwizzle(smc, decrypt=False)
-    nand.write_flat(DEFAULT_SMC_ADDR, smc)
-
-    # Encrypt and place keyvault
     kv = encrypt_keyvault(bytearray(kv))
-    nand.write_flat(DEFAULT_KV_ADDR, kv)
-
-    # SMC config -- 4 blocks at 0xF7C-0xF7F
-    if smc_config:
-        smc_config = smc_config.ljust(SMC_CONFIG_BLOCKS * BLOCK_SIZE, b"\xff")
-        for i in range(SMC_CONFIG_BLOCKS):
-            block_data = smc_config[i * BLOCK_SIZE : (i + 1) * BLOCK_SIZE]
-            nand.write_block(SMC_CONFIG_START + i, block_data)
-
-    # Encrypt and place bootloader chain
     bl_chain = encrypt_bl_chain(bootloaders)
-    nand.write_flat(bl_entry, bl_chain)
 
-    # Build and place BldrFlash header
+    # Build the entire boot region as one contiguous buffer
     header = BldrFlash()
     header.Bldr.Magic = 0x0F3F
     header.Bldr.Build = Bldr.from_buffer_copy(bootloaders[0][:0x10]).Build
@@ -98,7 +89,17 @@ def build_image(
     header.SmcConfigAddr = 0
     header.SmcSize = len(smc)
     header.SmcAddr = DEFAULT_SMC_ADDR
-    nand.write_flat(0, bytes(header))
+
+    boot_region = bytearray(DEFAULT_SYSUPDATE_ADDR)
+    boot_region[0 : len(bytes(header))] = bytes(header)
+    boot_region[DEFAULT_SMC_ADDR : DEFAULT_SMC_ADDR + len(smc)] = smc
+    boot_region[DEFAULT_KV_ADDR : DEFAULT_KV_ADDR + len(kv)] = kv
+    boot_region[bl_entry : bl_entry + len(bl_chain)] = bl_chain
+    nand.write_flat(0, boot_region)
+
+    # SMC config
+    if smc_config:
+        nand.write_flat(SMC_CONFIG_START * BLOCK_SIZE, smc_config)
 
     # Write mobile blocks
     fs_start = FS_START_BLOCK
@@ -142,6 +143,19 @@ def load_mobiles(mobile_dir):
     return mobiles
 
 
+def read_file(path):
+    with open(path, "rb") as f:
+        return f.read()
+
+
+def parse_block_list(s):
+    """Parse comma-separated hex block indices."""
+    blocks = []
+    for part in s.split(","):
+        blocks.append(int(part.strip(), 0))
+    return blocks
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -160,18 +174,36 @@ def main():
         "--input-dir",
         help="Directory with extracted components (smc.bin, kv.bin, s2-s5.bin, fs/, etc.)",
     )
-    src.add_argument("--smc", help="SMC binary (overrides update/input-dir)")
-    src.add_argument("--keyvault", help="Keyvault binary (overrides input-dir)")
-    src.add_argument("--smc-config", help="SMC config binary")
-    src.add_argument("--fs", help="Filesystem directory")
+
+    over = parser.add_argument_group("component overrides")
+    over.add_argument("--smc", help="SMC binary")
+    over.add_argument("--keyvault", help="Keyvault binary")
+    over.add_argument("--smc-config", help="SMC config binary")
+    over.add_argument("--s2", help="S2 bootloader")
+    over.add_argument("--s3", help="S3 bootloader")
+    over.add_argument("--s4", help="S4 bootloader")
+    over.add_argument("--s5", help="S5 bootloader")
+    over.add_argument("--fs", help="Filesystem directory")
+    for name in sorted(MOBILE_TYPES.values()):
+        over.add_argument(
+            f"--{name.lower()}", metavar="FILE", help=f"{name}.dat override"
+        )
+
+    adv = parser.add_argument_group("advanced")
+    adv.add_argument(
+        "--bad-blocks",
+        help="Comma-separated hex block indices to mark bad (e.g. 0x3b0,0x100)",
+    )
+
     args = parser.parse_args()
 
     bootloaders = []
+    bl_names = []
     smc = None
     kv = None
     smc_config = None
     fs_entries = None
-    mobiles = None
+    mobiles = []
 
     # Load from update binary
     if args.update:
@@ -179,11 +211,11 @@ def main():
             update_data = f.read()
         bl_list, update_smc = parse_update_binary(update_data)
         bootloaders = [bl for _, bl in bl_list]
+        bl_names = [name for name, _ in bl_list]
         smc = update_smc
-        for name, _ in bl_list:
-            print(
-                f"  {name.upper()} (update)\tBuild {Bldr.from_buffer_copy(bootloaders[bl_list.index((name,_))][:0x10]).Build}"
-            )
+        for i, (name, bl) in enumerate(bl_list):
+            bldr = Bldr.from_buffer_copy(bl[:0x10])
+            print(f"  {name.upper()} (update)\tBuild {bldr.Build}")
         if smc:
             print(f"  SMC (update)\t{len(smc):#x} bytes")
 
@@ -191,12 +223,10 @@ def main():
     d = args.input_dir
     if d:
         if not bootloaders:
-            bl_names = []
             for s in ("s2", "s3", "s4", "s5"):
                 p = os.path.join(d, f"{s}.bin")
                 if os.path.exists(p):
-                    with open(p, "rb") as f:
-                        bootloaders.append(f.read())
+                    bootloaders.append(read_file(p))
                     bl_names.append(s)
             for name in bl_names:
                 print(f"  {name.upper()}\t\t{os.path.join(d, name + '.bin')}")
@@ -204,45 +234,70 @@ def main():
         if smc is None:
             p = os.path.join(d, "smc.bin")
             if os.path.exists(p):
-                with open(p, "rb") as f:
-                    smc = f.read()
+                smc = read_file(p)
                 print(f"  SMC\t\t{p}")
 
         if kv is None:
             p = os.path.join(d, "kv.bin")
             if os.path.exists(p):
-                with open(p, "rb") as f:
-                    kv = f.read()
+                kv = read_file(p)
                 print(f"  KeyVault\t{p}")
 
         if smc_config is None:
             p = os.path.join(d, "smc_config.bin")
             if os.path.exists(p):
-                with open(p, "rb") as f:
-                    smc_config = f.read()
+                smc_config = read_file(p)
                 print(f"  SMC Config\t{p}")
 
         mobiles = load_mobiles(d)
 
-    # Explicit overrides
+    # Bootloader overrides (replace individual stages)
+    bl_overrides = {"s2": args.s2, "s3": args.s3, "s4": args.s4, "s5": args.s5}
+    for name, path in bl_overrides.items():
+        if path is None:
+            continue
+        data = read_file(path)
+        if name in bl_names:
+            idx = bl_names.index(name)
+            bootloaders[idx] = data
+        else:
+            bootloaders.append(data)
+            bl_names.append(name)
+        bldr = Bldr.from_buffer_copy(data[:0x10])
+        print(f"  {name.upper()} (override)\tBuild {bldr.Build}")
+
+    # Other overrides
     if args.smc:
-        with open(args.smc, "rb") as f:
-            smc = f.read()
+        smc = read_file(args.smc)
         print(f"  SMC\t\t{args.smc}")
     if args.keyvault:
-        with open(args.keyvault, "rb") as f:
-            kv = f.read()
+        kv = read_file(args.keyvault)
         print(f"  KeyVault\t{args.keyvault}")
     if args.smc_config:
-        with open(args.smc_config, "rb") as f:
-            smc_config = f.read()
+        smc_config = read_file(args.smc_config)
         print(f"  SMC Config\t{args.smc_config}")
+
+    # Mobile overrides
+    mobile_dict = {t: data for t, data in mobiles}
+    for name in sorted(MOBILE_TYPES.values()):
+        path = getattr(args, name.lower())
+        if path:
+            t = _MOBILE_NAME_TO_TYPE[name.lower()]
+            mobile_dict[t] = read_file(path)
+            print(f"  {name} (override)\t{path}")
+    mobiles = [(t, data) for t, data in sorted(mobile_dict.items())]
 
     # Filesystem
     fs_dir = args.fs or (os.path.join(d, "fs") if d else None)
     if fs_dir and os.path.isdir(fs_dir):
         fs_entries = load_fs_entries(fs_dir)
         print(f"  FS\t\t{fs_dir} ({len(fs_entries)} files)")
+
+    # Bad blocks
+    bad_blocks = None
+    if args.bad_blocks:
+        bad_blocks = parse_block_list(args.bad_blocks)
+        print(f"  Bad blocks\t{[f'{b:#x}' for b in bad_blocks]}")
 
     # Validate
     if not bootloaders:
@@ -253,12 +308,7 @@ def main():
         parser.error("No keyvault provided (use --keyvault or -i with kv.bin)")
 
     nand, fs_root_id = build_image(
-        smc,
-        kv,
-        bootloaders,
-        fs_entries,
-        smc_config,
-        mobiles,
+        smc, kv, bootloaders, fs_entries, smc_config, mobiles or None, bad_blocks
     )
 
     if mobiles:
