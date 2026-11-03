@@ -40,13 +40,19 @@ format. Values observed in local dumps (`dump.1640.bin`,
 
 `dump.1640.bin` also has mobile blocks (B, C, D, H, J) alongside XTAF.
 
-`build.py` has `build_image_1838` and `build_image_1640`; `--layout`
-picks one, otherwise S2 build ≤1640 → 1640. Known gaps in the code (do not
-paper over these in docs):
-- `build_image_1640` uses SMC 0x64000 (matches 1746, not 1640's 0x34000),
-  BL entry 0x1040 (matches 1640, not 1746's 0x14A0), and ignores mobiles.
-- 1746 auto-detects as 1838.
-- `pre_bl.bin` is loaded but writing it is commented out.
+`pre_bl.bin` on pre-1838 images is itself a stage with a Bldr header
+(magic 0x0231, Entry 0x80, Size = its length), so BL entry = 0x80 +
+pre-BL size (0x1040 on 1640, 0x14A0 on 1746).
+
+`build.py` has `build_image_1838` and `build_image_pre1838`; `--layout`
+picks one, otherwise S2 build <1838 → pre1838. `build_image_pre1838`
+derives offsets instead of hardcoding them: BL entry from the pre-BL size,
+SMC at the BL chain end rounded up to a block. `Bldr.Size` is 0x1000000
+for S2 ≤1640 (as in the 1640 dumps), else the end of the SMC block (as in
+1746). Round-tripping the 1640 and 1746 dumps gives byte-identical boot
+regions. Known gaps in the code (do not paper over these in docs):
+- `build_image_pre1838` ignores mobiles.
+- XTAF volume ID is hardcoded (0x299ED947, from 1640; 1746 has 0x3F38E013).
 - extract's pre-BL dump on 1838 images captures the SMC + KV region.
 
 Only document what is verified from code or dumps; don't generalize

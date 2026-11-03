@@ -8,6 +8,7 @@ Builds a raw NAND image (with spare bytes) from either:
 """
 
 import argparse
+import ctypes
 import datetime
 import os
 
@@ -33,11 +34,10 @@ from nand import (
 )
 from xtaf import write_xtaf
 
-# 1640 layout constants
-LAYOUT_1640_MAGIC = 0xFF3F
-LAYOUT_1640_BL_ENTRY = 0x1040
-LAYOUT_1640_SMC_ADDR = 0x64000
-LAYOUT_1640_BOOT_SIZE = 0x68000
+# Pre-1838 layout. The pre-BL stage sits right after the header, the BL
+# chain follows it, and the SMC starts at the next block after the chain.
+PRE1838_MAGIC = 0xFF3F
+PRE1838_DEFAULT_BL_ENTRY = 0x1040  # used only when no pre_bl.bin is given
 XTAF_PARTITION_BLOCK = 0x80
 
 # Reverse map for CLI: name -> block type
@@ -101,7 +101,7 @@ def build_image_1838(
     return nand, fs_root_id
 
 
-def build_image_1640(
+def build_image_pre1838(
     smc,
     bootloaders,
     fs_files=None,
@@ -109,19 +109,38 @@ def build_image_1640(
     bad_blocks=None,
     pre_bl=None,
 ):
+    """
+    Build a pre-1838 image. Offsets are derived from component sizes:
+      BL entry = header size + pre-BL size
+      SMC addr = BL chain end, rounded up to a block
+    Returns (nand, bl_entry, smc_addr).
+    """
     nand = Nand.empty(bad_blocks)
 
     smc = bytearray(smc)
     XeCryptSwizzle(smc, decrypt=False)
     bl_chain = encrypt_bl_chain(bootloaders)
 
+    header_size = ctypes.sizeof(BldrFlash)
+    if pre_bl:
+        bl_entry = header_size + len(pre_bl)
+    else:
+        bl_entry = PRE1838_DEFAULT_BL_ENTRY
+    chain_end = bl_entry + len(bl_chain)
+    smc_addr = (chain_end + BLOCK_SIZE - 1) // BLOCK_SIZE * BLOCK_SIZE
+    smc_end = smc_addr + len(smc)
+    boot_size = (smc_end + BLOCK_SIZE - 1) // BLOCK_SIZE * BLOCK_SIZE
+
+    s2_build = Bldr.from_buffer_copy(bootloaders[0][:0x10]).Build
+
     header = BldrFlash()
-    header.Bldr.Magic = LAYOUT_1640_MAGIC
+    header.Bldr.Magic = PRE1838_MAGIC
     header.Bldr.Build = 0
     header.Bldr.Qfe = 0
     header.Bldr.Flags = 0
-    header.Bldr.Entry = LAYOUT_1640_BL_ENTRY
-    header.Bldr.Size = 0x1000000
+    header.Bldr.Entry = bl_entry
+    # 1640 dumps have 0x1000000 here; 1746 dumps have the end of the SMC block
+    header.Bldr.Size = 0x1000000 if s2_build <= 1640 else boot_size
     copyright_str = b"\xa9 2004-2005 Microsoft Corporation. All rights reserved."
     for i, b in enumerate(copyright_str[:64]):
         header.Copyright[i] = b
@@ -133,17 +152,14 @@ def build_image_1640(
     header.PatchSlotSize = 0
     header.SmcConfigAddr = 0
     header.SmcSize = len(smc)
-    header.SmcAddr = LAYOUT_1640_SMC_ADDR
+    header.SmcAddr = smc_addr
 
-    import ctypes
-    header_size = ctypes.sizeof(BldrFlash)
-
-    boot_region = bytearray(LAYOUT_1640_BOOT_SIZE)
+    boot_region = bytearray(boot_size)
     boot_region[0:header_size] = bytes(header)
-    # if pre_bl:
-    #     boot_region[header_size:header_size + len(pre_bl)] = pre_bl
-    boot_region[LAYOUT_1640_BL_ENTRY:LAYOUT_1640_BL_ENTRY + len(bl_chain)] = bl_chain
-    boot_region[LAYOUT_1640_SMC_ADDR:LAYOUT_1640_SMC_ADDR + len(smc)] = smc
+    if pre_bl:
+        boot_region[header_size:bl_entry] = pre_bl
+    boot_region[bl_entry:chain_end] = bl_chain
+    boot_region[smc_addr:smc_end] = smc
     nand.write_flat(0, boot_region)
 
     if smc_config:
@@ -152,7 +168,7 @@ def build_image_1640(
     if fs_files:
         write_xtaf(nand, fs_files, XTAF_PARTITION_BLOCK)
 
-    return nand
+    return nand, bl_entry, smc_addr
 
 
 def load_fs_entries(fs_dir):
@@ -238,6 +254,7 @@ def main():
     over.add_argument("--s4", help="S4 bootloader")
     over.add_argument("--s5", help="S5 bootloader")
     over.add_argument("--fs", help="Filesystem directory")
+    over.add_argument("--pre-bl", help="Pre-BL stage (pre-1838 layout only)")
     for name in sorted(MOBILE_TYPES.values()):
         over.add_argument(
             f"--{name.lower()}", metavar="FILE", help=f"{name}.dat override"
@@ -250,7 +267,7 @@ def main():
     )
     adv.add_argument(
         "--layout",
-        choices=["1838", "1640"],
+        choices=["1838", "pre1838"],
         default=None,
         help="Flash layout (auto-detected from bootloader build if omitted)",
     )
@@ -357,14 +374,14 @@ def main():
     layout = args.layout
     if layout is None and bootloaders:
         bl_build = Bldr.from_buffer_copy(bootloaders[0][:0x10]).Build
-        layout = "1640" if bl_build <= 1640 else "1838"
+        layout = "pre1838" if bl_build < 1838 else "1838"
 
     # Validate
     if not bootloaders:
         parser.error("No bootloaders provided (use --update or -i with s2-s5.bin)")
     if smc is None:
         parser.error("No SMC provided (use --smc, --update, or -i with smc.bin)")
-    if layout != "1640" and kv is None:
+    if layout == "1838" and kv is None:
         parser.error("No keyvault provided (use --keyvault or -i with kv.bin)")
 
     print(f"  Layout\t{layout}")
@@ -372,22 +389,28 @@ def main():
     # Filesystem
     fs_dir = args.fs or (os.path.join(d, "fs") if d else None)
 
-    if layout == "1640":
+    if layout == "pre1838":
         fs_files = None
         if fs_dir and os.path.isdir(fs_dir):
             fs_files = load_fs_files(fs_dir)
             print(f"  FS\t\t{fs_dir} ({len(fs_files)} files, XTAF)")
 
         pre_bl = None
-        if d:
+        if args.pre_bl:
+            pre_bl = read_file(args.pre_bl)
+            print(f"  Pre-BL (override)\t{args.pre_bl}")
+        elif d and os.path.exists(os.path.join(d, "pre_bl.bin")):
             p = os.path.join(d, "pre_bl.bin")
-            if os.path.exists(p):
-                pre_bl = read_file(p)
-                print(f"  Pre-BL\t{p}")
+            pre_bl = read_file(p)
+            print(f"  Pre-BL\t{p}")
+        else:
+            print(f"  Pre-BL\tnone (BL entry defaults to {PRE1838_DEFAULT_BL_ENTRY:#x})")
 
-        nand = build_image_1640(
+        nand, bl_entry, smc_addr = build_image_pre1838(
             smc, bootloaders, fs_files, smc_config, bad_blocks, pre_bl
         )
+        print(f"  BL Entry\t{bl_entry:#x}")
+        print(f"  SMC Addr\t{smc_addr:#x}")
         nand.save(args.output)
     else:
         fs_entries = None

@@ -78,20 +78,25 @@ final format. Values seen in the dumps this tool has been used on:
 `extract.py` reads all of these. It finds every component through the
 flash header and checks block 0x80 for XTAF before falling back to SFCX.
 
-`build.py` has two layouts, `1838` and `1640`. It uses `1640` when the S2
-bootloader's build number is 1640 or lower and `1838` otherwise; override
-with `--layout`.
+`build.py` has two layouts, `1838` and `pre1838`, chosen from the S2
+bootloader's build number (override with `--layout`). For `pre1838` it
+works out the offsets from the component sizes instead of using fixed
+values:
+
+- `pre_bl.bin` (a bootloader stage of its own) goes right after the
+  0x80-byte flash header, and the bootloader chain starts after it.
+- The SMC starts at the first block boundary after the bootloader chain.
+
+Rebuilding the 1640 and 1746 dumps this way reproduces their boot regions
+byte for byte. Without `pre_bl.bin` (e.g. when building from
+`--update`), the bootloader entry falls back to 0x1040.
 
 ## Known limitations
 
-- `pre_bl.bin` is extracted but not yet written back by `build.py`.
-- The `1640` build layout puts the SMC at 0x64000. That matches the 1746
-  dump, but 1640 dumps have it at 0x34000.
-- A 1746 image is auto-detected as `1838`; it needs `--layout 1640`, and
-  even then its bootloader entry (0x14A0) differs from the one `build.py`
-  writes (0x1040).
-- The `1640` build layout does not write mobile blocks, although one 1640
-  dump contains them.
+- The `pre1838` build layout does not write mobile blocks, although one
+  1640 dump contains them.
+- `build.py` always writes the same XTAF volume ID (the one from the 1640
+  dumps); the 1746 dump has a different one.
 - On 1838 images, `pre_bl.bin` contains the SMC and keyvault, because
   both sit between the header and the bootloader entry.
 
