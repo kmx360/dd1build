@@ -1,8 +1,8 @@
 # dd1build
 
 Tools to extract and rebuild raw NAND images for Xbox 360 DD1 XeDK
-(early development kit) machines. DD1 uses an all-zero 1BL key and CPU
-key, so all crypto is done with known keys.
+machines. DD1 is a prototype XeDK with its own bootloaders. It uses an
+all-zero 1BL key and CPU key, so all crypto is done with known keys.
 
 ## Layout
 
@@ -26,20 +26,31 @@ key, so all crypto is done with known keys.
 ## Two flash layouts
 
 Builds before 1838 use a different flash layout; 1838 introduced the final
-format. DD1 is a prototype and uses its own bootloaders even on 1838+.
+format. Values observed in local dumps (`dump.1640.bin`,
+`1640.clean.settings.bin`, `1746_1.bin`, `1838.clean.bin`):
 
-| | 1838+ (final) | pre-1838 (e.g. 1640) |
-|---|---|---|
-| Header magic | 0x0F3F | 0xFF3F |
-| BL entry | 0x8000 | 0x1040 |
-| SMC | 0x1000 | 0x64000 |
-| Keyvault | 0x4000 | none |
-| Filesystem | SFCX + mobiles | XTAF @ block 0x80 |
+| | 1640 | 1746 | 1838 |
+|---|---|---|---|
+| Header magic | 0xFF3F | 0xFF3F | 0x0F3F |
+| Bootloader entry | 0x1040 | 0x14A0 | 0x8000 |
+| SMC address | 0x34000 | 0x64000 | 0x1000 |
+| Keyvault | none | none | 0x4000 |
+| Bootloader stages | S2–S4 | S2–S5 | S2–S5 |
+| Flash filesystem | XTAF at block 0x80 | XTAF at block 0x80 | SFCX |
 
-`build.py --layout` picks one; otherwise it is inferred from the S2 build
-number (≤1640 → 1640). `pre_bl.bin` is extracted for 1640 images and
-loaded by build, but writing it is currently commented out in
-`build_image_1640`.
+`dump.1640.bin` also has mobile blocks (B, C, D, H, J) alongside XTAF.
+
+`build.py` has `build_image_1838` and `build_image_1640`; `--layout`
+picks one, otherwise S2 build ≤1640 → 1640. Known gaps in the code (do not
+paper over these in docs):
+- `build_image_1640` uses SMC 0x64000 (matches 1746, not 1640's 0x34000),
+  BL entry 0x1040 (matches 1640, not 1746's 0x14A0), and ignores mobiles.
+- 1746 auto-detects as 1838.
+- `pre_bl.bin` is loaded but writing it is commented out.
+- extract's pre-BL dump on 1838 images captures the SMC + KV region.
+
+Only document what is verified from code or dumps; don't generalize
+about other Xbox 360 hardware or builds.
 
 ## Usage
 

@@ -3,7 +3,7 @@ Xbox 360 DD1 XeDK -- NAND structures, crypto, and SFCX filesystem.
 
 DD1 XeDK machines use all-zero 1BL key and CPU key.
 
-Flash layout (logical, flat addressing via nandio.Nand):
+1838 flash layout (logical, flat addressing via nandio.Nand):
   0x0000  BldrFlash header (contains offsets to everything)
   SMC     at SmcAddr,       size SmcSize       (XeCryptSwizzle encrypted)
   KV      at KeyVaultAddr,  size 0x4000        (KeyVaultSize in header may be 0)
@@ -145,7 +145,7 @@ class DirEnt(ctypes.BigEndianStructure):
 
 
 def XeCryptSwizzle(data, decrypt):
-    """In-place XOR swizzle used on SMC image. Operates on a bytearray."""
+    """In-place SMC encrypt/decrypt (rolling-key XOR). Operates on a bytearray."""
     key = bytearray((0x42, 0x75, 0x4E, 0x79))
     for i in range(len(data)):
         if decrypt:
@@ -180,7 +180,7 @@ def decrypt_bl_chain_raw(region):
     Decrypt a DD1 bootloader chain from raw bytes.
 
     Walks the region parsing Bldr headers until the data runs out.
-    The number of stages varies (3 on early builds, 4 on later ones).
+    The number of stages varies (3 on 1640, 4 on 1746 and 1838).
     Returns list of (name, decrypted_bytearray) tuples.
     """
     off = 0
@@ -316,10 +316,9 @@ def read_mobiles(nand, typed_blocks):
     Read mobile blocks from scan results. Returns list of
     (filename, data_bytes) tuples.
 
-    The console appends new versions of a mobile to the next free pages
-    within the same block. The current version is found by locating the
-    last written page and using fs_size to determine how many pages back
-    to read.
+    A mobile block can hold several versions on successive pages. The
+    current version is found by locating the last written page and using
+    fs_size to determine how many pages back to read.
     """
     result = []
     for t in sorted(MOBILE_TYPES):

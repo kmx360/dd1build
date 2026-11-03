@@ -6,8 +6,7 @@ DD1 is a prototype XeDK that uses its own bootloaders. Its 1BL key and
 CPU key are all zeros, so every encrypted part of the flash (SMC,
 keyvault, bootloader chain) can be decrypted and re-encrypted. That makes
 it possible to pull a dump apart, swap components (a different SMC,
-bootloaders from another build, a modified flash filesystem), and write
-a working image back.
+bootloaders, a modified flash filesystem), and write a new image.
 
 ## Requirements
 
@@ -32,11 +31,11 @@ This writes:
 | File | Contents |
 |---|---|
 | `smc.bin` | Decrypted SMC firmware |
-| `kv.bin` | Decrypted keyvault (later layout only) |
+| `kv.bin` | Decrypted keyvault, if present |
 | `smc_config.bin` | SMC config blocks |
 | `s2.bin` … `s5.bin` | Decrypted bootloader stages |
 | `pre_bl.bin` | Data between the flash header and the bootloaders, if any |
-| `*.dat` | Mobile data blocks (later layout only) |
+| `*.dat` | Mobile blocks, if present |
 | `fs/` | Files from the flash filesystem |
 
 ## Building an image
@@ -65,21 +64,36 @@ blocks and `--bad-blocks` to mark specific blocks bad in the output.
 ## Supported flash layouts
 
 Builds before 1838 use a different flash layout; 1838 introduced the
-final format. Both are supported:
+final format. Values seen in the dumps this tool has been used on:
 
-| | 1838 and later | Before 1838 (e.g. 1640) |
-|---|---|---|
-| Keyvault | yes | no |
-| Flash filesystem | SFCX, plus mobile blocks | XTAF partition at block 0x80 |
+| | 1640 | 1746 | 1838 |
+|---|---|---|---|
+| Header magic | 0xFF3F | 0xFF3F | 0x0F3F |
+| Bootloader entry | 0x1040 | 0x14A0 | 0x8000 |
+| SMC address | 0x34000 | 0x64000 | 0x1000 |
+| Keyvault | none | none | 0x4000 |
+| Bootloader stages | S2–S4 | S2–S5 | S2–S5 |
+| Flash filesystem | XTAF at block 0x80 | XTAF at block 0x80 | SFCX |
 
-`extract.py` detects the layout automatically. `build.py` uses the 1640
-layout when the S2 bootloader's build number is 1640 or lower and the
-1838 layout otherwise; override with `--layout 1640` or `--layout 1838`.
+`extract.py` reads all of these. It finds every component through the
+flash header and checks block 0x80 for XTAF before falling back to SFCX.
+
+`build.py` has two layouts, `1838` and `1640`. It uses `1640` when the S2
+bootloader's build number is 1640 or lower and `1838` otherwise; override
+with `--layout`.
 
 ## Known limitations
 
-- `pre_bl.bin` is extracted from early-layout images but not yet written
-  back by `build.py`.
+- `pre_bl.bin` is extracted but not yet written back by `build.py`.
+- The `1640` build layout puts the SMC at 0x64000. That matches the 1746
+  dump, but 1640 dumps have it at 0x34000.
+- A 1746 image is auto-detected as `1838`; it needs `--layout 1640`, and
+  even then its bootloader entry (0x14A0) differs from the one `build.py`
+  writes (0x1040).
+- The `1640` build layout does not write mobile blocks, although one 1640
+  dump contains them.
+- On 1838 images, `pre_bl.bin` contains the SMC and keyvault, because
+  both sit between the header and the bootloader entry.
 
 ## Verifying a rebuild
 

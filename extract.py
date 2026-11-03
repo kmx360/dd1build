@@ -3,7 +3,7 @@
 Xbox 360 DD1 XeDK NAND image extractor.
 
 Extracts SMC, keyvault, SMC config, bootloaders (S2-S5), mobile blocks,
-and SFCX filesystem contents from a raw NAND dump with spare bytes.
+and XTAF or SFCX filesystem contents from a raw NAND dump with spare bytes.
 """
 
 import argparse
