@@ -23,6 +23,9 @@ from nand import (
     SMC_CONFIG_START,
     SMC_CONFIG_BLOCKS,
 )
+from xtaf import has_xtaf, read_xtaf
+
+XTAF_PARTITION_BLOCK = 0x80
 
 
 def extract_image(input_path, output_dir):
@@ -86,6 +89,17 @@ def extract_image(input_path, output_dir):
     else:
         print("  SMC Config\tempty")
 
+    # Pre-bootloader data (between header and BL entry, if non-zero)
+    import ctypes as _ctypes
+    header_size = _ctypes.sizeof(BldrFlash)
+    if header.Bldr.Entry > header_size:
+        pre_bl = nand.read_flat(header_size, header.Bldr.Entry - header_size)
+        if any(b != 0 for b in pre_bl):
+            path = os.path.join(output_dir, "pre_bl.bin")
+            with open(path, "wb") as f:
+                f.write(pre_bl)
+            print(f"  Pre-BL\t{len(pre_bl):#x} bytes -> {path}")
+
     # Bootloaders
     bootloaders = decrypt_bl_chain(nand, header)
     for name, bl in bootloaders:
@@ -106,10 +120,21 @@ def extract_image(input_path, output_dir):
     else:
         print("  Mobiles\tnone")
 
-    # Filesystem
-    fs_root_id, files = read_fs(nand, typed_blocks)
+    # Filesystem -- try XTAF first, fall back to SFCX
+    files = []
+    fs_type = None
+    if has_xtaf(nand, XTAF_PARTITION_BLOCK):
+        files = read_xtaf(nand, XTAF_PARTITION_BLOCK)
+        fs_type = "XTAF"
+    else:
+        fs_root_id, files = read_fs(nand, typed_blocks)
+        fs_type = "SFCX"
+
     if files:
-        print(f"  FS Root\t{fs_root_id:#x}")
+        if fs_type == "SFCX":
+            print(f"  FS Root\t{fs_root_id:#x}")
+        else:
+            print(f"  FS\t\t{fs_type} at block {XTAF_PARTITION_BLOCK:#x}")
         fs_dir = os.path.join(output_dir, "fs")
         os.makedirs(fs_dir, exist_ok=True)
         for name, file_data in files:
@@ -118,7 +143,7 @@ def extract_image(input_path, output_dir):
                 f.write(file_data)
         print(f"  FS\t\t{len(files)} files -> {fs_dir}/")
     else:
-        print("  FS Root\tnot found")
+        print("  FS\t\tnot found")
 
 
 def main():
