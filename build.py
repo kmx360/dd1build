@@ -31,12 +31,12 @@ from nand import (
     DEFAULT_SMC_ADDR,
     DEFAULT_SYSUPDATE_ADDR,
     FS_START_BLOCK,
+    PRE1838_MAGIC,
 )
 from xtaf import write_xtaf
 
 # Pre-1838 layout. The pre-BL stage sits right after the header, the BL
 # chain follows it, and the SMC starts at the next block after the chain.
-PRE1838_MAGIC = 0xFF3F
 PRE1838_DEFAULT_BL_ENTRY = 0x1040  # used only when no pre_bl.bin is given
 XTAF_PARTITION_BLOCK = 0x80
 

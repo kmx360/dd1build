@@ -37,6 +37,9 @@ DEFAULT_KV_ADDR = 0x4000
 DEFAULT_BL_ENTRY = 0x8000
 DEFAULT_SYSUPDATE_ADDR = 0x74000
 
+# BldrFlash magic on pre-1838 images (1838 uses 0x0F3F)
+PRE1838_MAGIC = 0xFF3F
+
 # First block available for filesystem allocation
 FS_START_BLOCK = 0x50
 

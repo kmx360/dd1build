@@ -34,7 +34,7 @@ This writes:
 | `kv.bin` | Decrypted keyvault, if present |
 | `smc_config.bin` | SMC config blocks |
 | `s2.bin` … `s5.bin` | Decrypted bootloader stages |
-| `pre_bl.bin` | Data between the flash header and the bootloaders, if any |
+| `pre_bl.bin` | Pre-BL stage between the flash header and the bootloaders (pre-1838 only) |
 | `*.dat` | Mobile blocks, if present |
 | `fs/` | Files from the flash filesystem |
 
@@ -97,8 +97,6 @@ byte for byte. Without `pre_bl.bin` (e.g. when building from
   1640 dump contains them.
 - `build.py` always writes the same XTAF volume ID (the one from the 1640
   dumps); the 1746 dump has a different one.
-- On 1838 images, `pre_bl.bin` contains the SMC and keyvault, because
-  both sit between the header and the bootloader entry.
 
 ## Verifying a rebuild
 

@@ -40,7 +40,8 @@ format. Values observed in local dumps (`dump.1640.bin`,
 
 `dump.1640.bin` also has mobile blocks (B, C, D, H, J) alongside XTAF.
 
-`pre_bl.bin` on pre-1838 images is itself a stage with a Bldr header
+1838 has no pre-BL; extract only writes `pre_bl.bin` when the header magic
+is `PRE1838_MAGIC` (0xFF3F). On pre-1838 images it is itself a stage with a Bldr header
 (magic 0x0231, Entry 0x80, Size = its length), so BL entry = 0x80 +
 pre-BL size (0x1040 on 1640, 0x14A0 on 1746).
 
@@ -53,7 +54,6 @@ for S2 ≤1640 (as in the 1640 dumps), else the end of the SMC block (as in
 regions. Known gaps in the code (do not paper over these in docs):
 - `build_image_pre1838` ignores mobiles.
 - XTAF volume ID is hardcoded (0x299ED947, from 1640; 1746 has 0x3F38E013).
-- extract's pre-BL dump on 1838 images captures the SMC + KV region.
 
 Only document what is verified from code or dumps; don't generalize
 about other Xbox 360 hardware or builds.

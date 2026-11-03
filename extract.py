@@ -22,6 +22,7 @@ from nand import (
     KV_SIZE,
     SMC_CONFIG_START,
     SMC_CONFIG_BLOCKS,
+    PRE1838_MAGIC,
 )
 from xtaf import has_xtaf, read_xtaf
 
@@ -89,10 +90,11 @@ def extract_image(input_path, output_dir):
     else:
         print("  SMC Config\tempty")
 
-    # Pre-bootloader data (between header and BL entry, if non-zero)
+    # Pre-BL stage (pre-1838 only): between the header and the BL entry.
+    # On 1838 that range holds the SMC and keyvault instead.
     import ctypes as _ctypes
     header_size = _ctypes.sizeof(BldrFlash)
-    if header.Bldr.Entry > header_size:
+    if header.Bldr.Magic == PRE1838_MAGIC and header.Bldr.Entry > header_size:
         pre_bl = nand.read_flat(header_size, header.Bldr.Entry - header_size)
         if any(b != 0 for b in pre_bl):
             path = os.path.join(output_dir, "pre_bl.bin")
