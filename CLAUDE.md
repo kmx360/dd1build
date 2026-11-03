@@ -25,7 +25,10 @@ key, so all crypto is done with known keys.
 
 ## Two flash layouts
 
-| | 1838 (later) | 1640 (early) |
+Builds before 1838 use a different flash layout; 1838 introduced the final
+format. DD1 is a prototype and uses its own bootloaders even on 1838+.
+
+| | 1838+ (final) | pre-1838 (e.g. 1640) |
 |---|---|---|
 | Header magic | 0x0F3F | 0xFF3F |
 | BL entry | 0x8000 | 0x1040 |

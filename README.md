@@ -2,12 +2,12 @@
 
 Extract and rebuild NAND images for Xbox 360 DD1 XeDK development kits.
 
-DD1 kits use an all-zero 1BL key and CPU key, so every encrypted part of
-the flash (SMC, keyvault, bootloader chain) can be decrypted and
-re-encrypted without any per-console secrets. That makes it possible to
-pull a dump apart, swap components (a different SMC, bootloaders from
-another build, a modified flash filesystem), and write a working image
-back.
+DD1 is a prototype XeDK that uses its own bootloaders. Its 1BL key and
+CPU key are all zeros, so every encrypted part of the flash (SMC,
+keyvault, bootloader chain) can be decrypted and re-encrypted. That makes
+it possible to pull a dump apart, swap components (a different SMC,
+bootloaders from another build, a modified flash filesystem), and write
+a working image back.
 
 ## Requirements
 
@@ -64,24 +64,22 @@ blocks and `--bad-blocks` to mark specific blocks bad in the output.
 
 ## Supported flash layouts
 
-DD1 kits shipped with two different flash layouts depending on the
-system build:
+Builds before 1838 use a different flash layout; 1838 introduced the
+final format. Both are supported:
 
-| | Later builds (e.g. 1838) | Early builds (e.g. 1640) |
+| | 1838 and later | Before 1838 (e.g. 1640) |
 |---|---|---|
 | Keyvault | yes | no |
 | Flash filesystem | SFCX, plus mobile blocks | XTAF partition at block 0x80 |
 
-`extract.py` detects the layout automatically. `build.py` picks it from
-the S2 bootloader's build number; override with `--layout 1640` or
-`--layout 1838`.
+`extract.py` detects the layout automatically. `build.py` uses the 1640
+layout when the S2 bootloader's build number is 1640 or lower and the
+1838 layout otherwise; override with `--layout 1640` or `--layout 1838`.
 
 ## Known limitations
 
 - `pre_bl.bin` is extracted from early-layout images but not yet written
   back by `build.py`.
-- Only DD1 XeDK hardware is supported. Retail and later dev kits use
-  per-console keys and a different flash format.
 
 ## Verifying a rebuild
 
